@@ -1,0 +1,9 @@
+Click and drag to pan, scroll to zoom
+Click node to select it
+    Drag from node to create a connection
+    Drag "<->" button to move node
+    Type to change text
+Type when no node is selected to create a new one
+
+Bugs:
+ - SVG export is incorrectly offset
