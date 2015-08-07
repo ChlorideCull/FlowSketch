@@ -7,6 +7,7 @@
 // Static configuration //
 const int MaxBlockWidth = 200;
 const int BlockPadding = 15;
+const int GripWidth = 30;
 
 // Initializers //
 
@@ -66,13 +67,15 @@ NodeSize getNodeSize(QFont font, QFont titlefont, FlowNode& node) {
 }
 
 void renderFullTree(QPaintDevice *paintdev, SketchXMLHandler* XMLHandlr,
-                    QColor LineColor, std::uint16_t BaseFontSize,
-                    double Width, double Height, double PermaScale, double ScaleFactor, double PanX, double PanY) {
+                    QColor LineColor, std::uint16_t BaseFontSize, std::string SelectedGUID,
+                    double Width, double Height, double PermaScale, double ScaleFactor, double PanX, double PanY,
+                    QTransform *paintTransform = nullptr) {
     QPainter paint(paintdev);
     paint.resetTransform();
     paint.translate(double(Width/2) + (PanX * ScaleFactor), double(Height/2) + (PanY * ScaleFactor));
-
     paint.scale(PermaScale * Width * ScaleFactor, PermaScale * Width * ScaleFactor);
+    if (paintTransform != nullptr)
+        *paintTransform = paint.worldTransform();
     paint.setRenderHint(QPainter::Antialiasing, true);
     paint.setRenderHint(QPainter::TextAntialiasing, true);
     paint.setRenderHint(QPainter::SmoothPixmapTransform, true);
@@ -130,6 +133,16 @@ void renderFullTree(QPaintDevice *paintdev, SketchXMLHandler* XMLHandlr,
                        ns.DescBoundBox.width(), ns.DescBoundBox.height(),
                        Qt::AlignCenter | Qt::TextWordWrap,
                        QString(nodepair.second.Desc.c_str()));
+
+        if (nodepair.second.GUID == SelectedGUID) {
+            //Edge blocks
+            paint.fillRect(rectoriginx + ns.Width - GripWidth/2, rectoriginy - GripWidth/2,
+                           GripWidth, GripWidth,
+                           Qt::black);
+            paint.fillRect(rectoriginx + ns.Width + 2 - GripWidth/2, rectoriginy + 2 - GripWidth/2,
+                           GripWidth-4, GripWidth-4,
+                           Qt::white);
+        }
     });
     paint.end();
 }
@@ -213,7 +226,7 @@ void flowwidget::SaveSVG(std::ostream &data) {
     svgen.setOutputDevice(iodev);
     svgen.setSize(QSize(SVGSize, SVGSize));
     renderFullTree(&svgen, XMLHandlr,
-                   LineColor, BaseFontSize,
+                   LineColor, BaseFontSize, "",
                    SVGSize, SVGSize, PermaScale, 1, 0, 0);
     data.flush();
     std::cerr << "[FlowWidget] Finished export!" << std::endl;
@@ -227,8 +240,9 @@ void flowwidget::paintEvent(QPaintEvent* event) {
     paint.fillRect(1, 1, this->size().width()-2, this->size().height()-2, Qt::white);
     paint.end();
     renderFullTree(this, XMLHandlr,
-                   LineColor, BaseFontSize,
-                   this->size().width(), this->size().height(), PermaScale, ScaleFactor, PanX, PanY);
+                   LineColor, BaseFontSize, SelectedGUID,
+                   this->size().width(), this->size().height(), PermaScale, ScaleFactor, PanX, PanY,
+                   &paintTransform);
     paint.begin(this);
     paint.setRenderHint(QPainter::Antialiasing, true);
     paint.setPen(Qt::black);
@@ -237,16 +251,71 @@ void flowwidget::paintEvent(QPaintEvent* event) {
 
 void flowwidget::mousePressEvent(QMouseEvent* event) {
     previousMouseMove = event->localPos();
-    this->update();
+    hasHeld = false;
+    std::cerr << "[FlowWidget-MouseCtrl] Detected mouse press on behalf of " << ((SelectedGUID != "")?SelectedGUID:"no one") << "." << std::endl;
+    if (SelectedGUID != "") {
+        QPointF calibLocalPos = paintTransform.inverted().map(event->localPos());
+        //A node is selected already
+        FlowNode fn = XMLHandlr->OrphanNodes[SelectedGUID];
+        QFont basefont = QFont("sans-serif", BaseFontSize*fn.FontSizeMult);
+        QFont titlefont = QFont("sans-serif", BaseFontSize*fn.FontSizeMult*1.5);
+        NodeSize ns = getNodeSize(basefont, titlefont, fn);
+
+        int MoveButtonXOrigin = fn.CenterPosX + (ns.Width/2) - GripWidth/2;
+        int MoveButtonYOrigin = fn.CenterPosY - (ns.Height/2) - GripWidth/2;
+        if ((MoveButtonXOrigin < calibLocalPos.x()) &&
+                (MoveButtonYOrigin < calibLocalPos.y()) &&
+                (MoveButtonXOrigin + GripWidth > calibLocalPos.x()) &&
+                (MoveButtonYOrigin + GripWidth > calibLocalPos.y())) {
+            // Hit the node move button
+            dragState = MouseDragState::MOVE_NODE;
+            std::cerr << "[FlowWidget-MouseCtrl] Hit move button, set Drag State to MOVE_NODE." << std::endl;
+        } else {
+            //Deselect node
+            SelectedGUID = "";
+        }
+    }
 }
 
 void flowwidget::mouseReleaseEvent(QMouseEvent* event) {
     this->update();
+    if (!hasHeld) {
+        QPointF calibLocalPos = paintTransform.inverted().map(event->localPos());
+        //Click - find on what
+        if (SelectedGUID == "") {
+            //Selected a node
+            std::for_each(XMLHandlr->OrphanNodes.begin(), XMLHandlr->OrphanNodes.end(),
+                          [&](std::pair<std::string, FlowNode> nodepair) {
+                QFont basefont = QFont("sans-serif", BaseFontSize*nodepair.second.FontSizeMult);
+                QFont titlefont = QFont("sans-serif", BaseFontSize*nodepair.second.FontSizeMult*1.5);
+                NodeSize ns = getNodeSize(basefont, titlefont, nodepair.second);
+
+                if (((nodepair.second.CenterPosX - (ns.Width/2)) < calibLocalPos.x()) &&
+                        ((nodepair.second.CenterPosY - (ns.Height/2)) < calibLocalPos.y()) &&
+                        ((nodepair.second.CenterPosX + (ns.Width/2)) > calibLocalPos.x()) &&
+                        ((nodepair.second.CenterPosY + (ns.Height/2)) > calibLocalPos.y())) {
+                    //Correct node found
+                    SelectedGUID = nodepair.second.GUID;
+                }
+            });
+            if (SelectedGUID == "")
+                std::cerr << "[FlowWidget-MouseCtrl] Couldn't find a node, sorry :(" << std::endl;
+        }
+    }
+    dragState = MouseDragState::PAN;
 }
 
 void flowwidget::mouseMoveEvent(QMouseEvent* event) {
-    PanX += (event->localPos().x() - previousMouseMove.x()) / ScaleFactor;
-    PanY += (event->localPos().y() - previousMouseMove.y()) / ScaleFactor;
+    hasHeld = true;
+    if (dragState == MouseDragState::PAN) {
+        PanX += (event->localPos().x() - previousMouseMove.x()) / ScaleFactor;
+        PanY += (event->localPos().y() - previousMouseMove.y()) / ScaleFactor;
+    } else if (dragState == MouseDragState::MOVE_NODE) {
+        FlowNode fn = XMLHandlr->OrphanNodes[SelectedGUID];
+        fn.CenterPosX += (event->localPos().x() - previousMouseMove.x());
+        fn.CenterPosY += (event->localPos().y() - previousMouseMove.y());
+        XMLHandlr->OrphanNodes[SelectedGUID] = fn;
+    }
     previousMouseMove = event->localPos();
     event->accept();
     this->update();
